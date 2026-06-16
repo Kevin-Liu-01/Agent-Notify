@@ -1,9 +1,22 @@
-# agent-notify
+<p align="center">
+  <img src="assets/logo.svg" alt="Agent-Notify" width="150" height="150">
+</p>
 
-**Let any AI agent tap you on the shoulder.** When an agent is blocked - it
-needs your approval, an answer, or a decision - it pings you through your normal
-notification settings and waits for your reply. No more coming back to a chat
-that has been idle for an hour because the agent was too polite to interrupt.
+<h1 align="center">agent-notify</h1>
+
+<p align="center"><em>Let any AI agent tap you on the shoulder.</em></p>
+
+<p align="center">
+  <a href="#install">Install</a> &middot;
+  <a href="#the-four-verbs">Verbs</a> &middot;
+  <a href="#channels-the-linkup-layer">Channels</a> &middot;
+  <a href="LICENSE">MIT</a>
+</p>
+
+When an agent is blocked - it needs your approval, an answer, or a decision - it
+pings you through your normal notification settings and waits for your reply. No
+more coming back to a chat that has been idle for an hour because the agent was
+too polite to interrupt.
 
 One file, no dependencies (Python 3.8+ standard library only), works from any
 agent that can run a shell command: **Cursor, Claude Code, Codex, OpenClaw,
