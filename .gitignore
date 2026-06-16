@@ -9,14 +9,6 @@ venv/
 config.json
 /config.local.json
 
-# HyperFrames render output (regenerate with npm run render)
-demo/renders/
-
-# Licensed demo assets (Mixkit music, PP Telegraf trial fonts): fine to use
-# locally, not ours to redistribute. Supply your own copies to render the demo.
-demo/assets/bg-music.mp3
-demo/assets/fonts/
-
 # OS / editor cruft
 .DS_Store
 *.swp
