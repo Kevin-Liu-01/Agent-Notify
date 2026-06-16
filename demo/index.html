@@ -301,14 +301,14 @@
 
         <div class="intro clip" id="intro" data-start="0" data-duration="4" data-track-index="1">
           <img class="intro-logo" src="assets/logo.svg" alt="" width="132" height="132" />
-          <h1>Agent-Notify</h1>
+          <h1>Agent Ping</h1>
           <p>Let any AI agent tap you on the shoulder.</p>
         </div>
 
         <div class="ide-shell clip" id="ide" data-start="4" data-duration="38" data-track-index="2">
           <div class="titlebar">
             <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
-            <span>agent-notify</span>
+            <span>Agent Ping</span>
           </div>
           <div class="ide-body">
             <div class="sidebar">
@@ -343,7 +343,7 @@
                 <div id="line-confirm-out" class="term-hidden ok">→ approved (exit 0)</div>
               </div>
               <div class="statusbar">
-                <span>main</span><span>agent-notify</span>
+                <span>main</span><span>Agent Ping</span>
                 <span class="pill" id="status-pill">waiting for you</span>
               </div>
             </div>
@@ -351,17 +351,17 @@
               <div class="agent-header"><img class="agent-logo" src="assets/logo.svg" alt="" width="24" height="24" />Agent</div>
               <div class="agent-messages" id="chat-scroll">
                 <div class="msg agent" id="chat-1">Preview migration finished. I'll ping you, then ask before anything risky.</div>
-                <div class="msg tool" id="chat-tool-notify">Run: agent-notify notify "Migration complete on preview"</div>
+                <div class="msg tool" id="chat-tool-notify">Run: agentping notify "Migration complete on preview"</div>
                 <div class="msg agent" id="chat-2">Banner sent. Agent keeps going — notify does not block.</div>
                 <div class="msg agent" id="chat-3">I need a branch name before merge. Running ask — shell blocks until you reply.</div>
-                <div class="msg tool" id="chat-tool-ask">Run: agent-notify ask "Which branch should I merge?"</div>
+                <div class="msg tool" id="chat-tool-ask">Run: agentping ask "Which branch should I merge?"</div>
                 <div class="msg user" id="chat-user-ask">dev</div>
                 <div class="msg agent" id="chat-4">Got dev from stdout. Merging preview into dev now.</div>
                 <div class="msg agent" id="chat-5">Next: pick the rollout step. Running choose.</div>
-                <div class="msg tool" id="chat-tool-choose">Run: agent-notify choose ... --option hold --option ship --option rollback</div>
+                <div class="msg tool" id="chat-tool-choose">Run: agentping choose ... --option hold --option ship --option rollback</div>
                 <div class="msg user" id="chat-user-choose">ship</div>
                 <div class="msg agent" id="chat-6">Ship selected. Last gate: destructive prod migration.</div>
-                <div class="msg tool" id="chat-tool-confirm">Run: agent-notify confirm "Run destructive migration on prod?"</div>
+                <div class="msg tool" id="chat-tool-confirm">Run: agentping confirm "Run destructive migration on prod?"</div>
                 <div class="msg user" id="chat-user-confirm">Approved</div>
                 <div class="msg agent" id="chat-7">Running ./migrate.sh on prod now.</div>
               </div>
@@ -376,7 +376,7 @@
             <div class="notif" id="n-notify">
               <img class="notif-icon" src="assets/logo.svg" alt="" width="48" height="48" />
               <div class="notif-body">
-                <div class="notif-head"><span class="notif-app">Agent-Notify</span><span class="notif-time">now</span></div>
+                <div class="notif-head"><span class="notif-app">Agent Ping</span><span class="notif-time">now</span></div>
                 <div class="notif-title">Migration complete on preview</div>
                 <div class="notif-sub">One-way ping. Agent is not waiting.</div>
               </div>
@@ -384,7 +384,7 @@
             <div class="notif" id="n-ask">
               <img class="notif-icon" src="assets/logo.svg" alt="" width="48" height="48" />
               <div class="notif-body">
-                <div class="notif-head"><span class="notif-app">Agent-Notify · ask</span><span class="notif-time">now</span></div>
+                <div class="notif-head"><span class="notif-app">Agent Ping · ask</span><span class="notif-time">now</span></div>
                 <div class="notif-title">Which branch should I merge?</div>
                 <div class="notif-field"><span id="ask-text"></span><span class="caret" id="ask-caret"></span></div>
                 <div class="notif-actions" style="margin-top:12px"><div class="notif-btn primary" id="btn-reply">Reply</div></div>
@@ -393,7 +393,7 @@
             <div class="notif" id="n-choose">
               <img class="notif-icon" src="assets/logo.svg" alt="" width="48" height="48" />
               <div class="notif-body">
-                <div class="notif-head"><span class="notif-app">Agent-Notify · choose</span><span class="notif-time">now</span></div>
+                <div class="notif-head"><span class="notif-app">Agent Ping · choose</span><span class="notif-time">now</span></div>
                 <div class="notif-title">Pick next step</div>
                 <div class="notif-sub">Tap one option. Shell unblocks with exit code = index.</div>
                 <div class="notif-options">
@@ -408,7 +408,7 @@
             <div class="notif danger" id="n-confirm">
               <img class="notif-icon" src="assets/logo.svg" alt="" width="48" height="48" />
               <div class="notif-body">
-                <div class="notif-head"><span class="notif-app">Agent-Notify · confirm</span><span class="notif-time">now</span></div>
+                <div class="notif-head"><span class="notif-app">Agent Ping · confirm</span><span class="notif-time">now</span></div>
                 <span class="notif-badge">Destructive action</span>
                 <div class="notif-title">Run destructive migration on prod?</div>
                 <div class="notif-sub">Shell blocks until you approve or deny.</div>
@@ -453,7 +453,7 @@
               <h3>Confirm</h3>
             </div>
           </div>
-          <div class="outro-url">github.com/Kevin-Liu-01/Agent-Notify</div>
+          <div class="outro-url">github.com/Kevin-Liu-01/Agent-Ping</div>
         </div>
       </div>
     </div>
@@ -477,10 +477,10 @@
       const CONSIDER_OPTION = 0.48;
 
       const CMD = {
-        notify: 'agent-notify notify "Migration complete on preview"',
-        ask: 'agent-notify ask "Which branch should I merge?"',
-        choose: 'agent-notify choose "Pick next step" --option hold --option ship --option rollback',
-        confirm: 'agent-notify confirm "Run destructive migration on prod?"',
+        notify: 'agentping notify "Migration complete on preview"',
+        ask: 'agentping ask "Which branch should I merge?"',
+        choose: 'agentping choose "Pick next step" --option hold --option ship --option rollback',
+        confirm: 'agentping confirm "Run destructive migration on prod?"',
       };
 
       const PT = {

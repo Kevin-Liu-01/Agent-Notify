@@ -1,6 +1,6 @@
-# Agent-Notify demo video
+# Agent Ping demo video
 
-54-second HyperFrames composition showing the real agent-notify contract: shell blocks, you reply on the banner, stdout unblocks the agent, agent continues in chat.
+54-second HyperFrames composition showing the real Agent Ping contract: shell blocks, you reply on the banner, stdout unblocks the agent, agent continues in chat.
 
 ## Preview
 

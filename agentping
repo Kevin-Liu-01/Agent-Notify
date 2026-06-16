@@ -16,7 +16,7 @@ config file is the "notification linkup" layer: the agent always calls the
 same verbs, the user decides where the ping lands.
 
 Single file, standard library only, Python 3.8+. Drop it on any PATH and go.
-Home: https://github.com/Kevin-Liu-01/agentping
+Home: https://github.com/Kevin-Liu-01/Agent-Ping
 
 Exit codes (stable contract for the calling agent):
     0    delivered / answered / approved / chosen

@@ -32,13 +32,13 @@
     "approval",
     "human-in-the-loop"
   ],
-  "homepage": "https://github.com/Kevin-Liu-01/agentping#readme",
+  "homepage": "https://github.com/Kevin-Liu-01/Agent-Ping#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Kevin-Liu-01/agentping.git"
+    "url": "git+https://github.com/Kevin-Liu-01/Agent-Ping.git"
   },
   "bugs": {
-    "url": "https://github.com/Kevin-Liu-01/agentping/issues"
+    "url": "https://github.com/Kevin-Liu-01/Agent-Ping/issues"
   },
   "license": "MIT",
   "author": "Kevin Liu (Kevin-Liu-01)"

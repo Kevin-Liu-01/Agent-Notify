@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="agentping" width="150" height="150">
+  <img src="assets/logo.svg" alt="Agent Ping" width="150" height="150">
 </p>
 
-<h1 align="center">agentping</h1>
+<h1 align="center">Agent Ping</h1>
 
 <p align="center"><em>Let any AI agent tap you on the shoulder.</em></p>
 
@@ -31,7 +31,7 @@ agentping confirm "Run the destructive migration on prod?" && ./migrate.sh
 
 ## Why
 
-Agents stall silently or, worse, guess. Both are bad. `agentping` gives them
+Agents stall silently or, worse, guess. Both are bad. Agent Ping gives them
 a reliable out-of-band channel to you:
 
 - **Approval gates.** Pause before anything risky or irreversible.
@@ -51,15 +51,15 @@ idea: the *notification linkup* lives in your config, not in the agent.
 npm install -g agentping
 ```
 
-agentping is one Python file, and the npm package is a thin launcher around
+Agent Ping is one Python file, and the npm package is a thin launcher around
 it, so you need **Python 3.8+** on your `PATH` (point `AGENTPING_PYTHON` at a
 specific interpreter if `python3`/`python` isn't it). No Python packages to install.
 
 **From source:**
 
 ```bash
-git clone https://github.com/Kevin-Liu-01/agentping.git
-cd agentping
+git clone https://github.com/Kevin-Liu-01/Agent-Ping.git
+cd Agent-Ping
 ./install.sh            # symlinks `agentping` into ~/.local/bin
 # or:
 ./install.sh --skills   # also expose it as a skill to installed agents
@@ -168,7 +168,7 @@ a test ping. macOS may ask once to allow your terminal app to post notifications
 
 ### Notification sounds (macOS)
 
-Give agentping a distinct, recognizable sound so you know a ping is from your
+Give Agent Ping a distinct, recognizable sound so you know a ping is from your
 agent. Set `sound` on the `system` (or `banner`) channel:
 
 ```json
@@ -317,7 +317,7 @@ waiting on the answer. Run `agentping doctor` to print the resolved channels,
 
 ## Using it from an agent
 
-`agentping` ships a [`SKILL.md`](./SKILL.md), so agents that support skills
+Agent Ping ships a [`SKILL.md`](./SKILL.md), so agents that support skills
 (Claude Code, Codex, Cursor, OpenClaw, ...) can load it and learn when to reach for
 it. `./install.sh --skills` symlinks this repo into the skill directories it finds
 (`~/.claude/skills`, `~/.codex/skills`, `~/.cursor/skills`, `~/.openclaw/skills`,
