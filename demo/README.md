@@ -1,8 +1,6 @@
 # Agent-Notify demo video
 
-46-second HyperFrames composition: glassmorphic macOS notifications, Cursor-style glass IDE, bezier camera zooms, and live pointer interactions.
-
-Built with [HyperFrames](https://hyperframes.heygen.com) (HTML/CSS + GSAP → MP4).
+54-second HyperFrames composition showing the real agent-notify contract: shell blocks, you reply on the banner, stdout unblocks the agent, agent continues in chat.
 
 ## Preview
 
@@ -11,38 +9,44 @@ cd demo
 npm run dev
 ```
 
-Scrub the timeline in the HyperFrames studio.
-
 ## Render
 
 ```bash
 cd demo
-npm run check    # lint, validate, inspect
-npm run render   # writes demo/renders/demo_<timestamp>.mp4
+npm run render
 ```
 
-Requires Node 22+ and FFmpeg.
+Output: `demo/renders/demo_<timestamp>.mp4` (gitignored).
 
-## What it shows
+## Assets
 
-| Time | Scene |
-|------|-------|
-| 0–4s | Intro |
-| 4–46s | Cursor glass IDE with agent chat + terminal |
-| ~8–12s | **notify**: terminal types command → banner slides in → camera zooms |
-| ~12–22s | **ask**: zoom → cursor types `dev` in field → clicks Reply |
-| ~22–31s | **choose**: zoom → cursor hovers options → clicks ship |
-| ~31–40s | **confirm**: zoom → cursor clicks Approve |
-| 41–46s | Outro: four verb cards |
+`demo/assets/logo.svg` ships with the repo. The background music (Mixkit) and PP
+Telegraf fonts are licensed for use but not for redistribution, so they are
+gitignored. To render with audio and the intended type, drop your own copies at
+`demo/assets/bg-music.mp3` and `demo/assets/fonts/telegraf/PPTelegraf-Regular.woff2`
+(plus `-UltraBold`).
 
-## Motion
+## Storyboard (accurate)
 
-- **Camera rig** (`#camera`): `power4.inOut` / `expo.inOut` bezier zooms into each notification
-- **Pointer**: macOS arrow with click ripple, moves on `sine.inOut` curves
-- **Terminal**: commands type character-by-character with blinking caret
-- **Notifications**: slide + scale entrance, focused input field, button press states
+Each beat follows the actual CLI flow:
 
-## Skills
+1. **Agent** announces what it will run (chat tool call)
+2. **Terminal** types the command; blocking verbs show `⏳ blocked — waiting...`
+3. **Banner** slides in; camera **zooms in** for interaction, **zooms out** before dismiss
+4. **You** type/click on the notification (pointer is in camera space, aligned to buttons)
+5. **Terminal** unblocks with stdout / exit code (`→ stdout: dev`, `→ approved (exit 0)`)
+6. **Agent** responds in chat with the next step (not fake user chat bubbles)
 
-- **HyperFrames** — seekable GSAP timeline, deterministic render
-- **diagram-to-html** — fixed 1920×1080 canvas, system fonts
+| Verb | Blocks? | Terminal result | Agent chat after |
+|------|---------|-----------------|------------------|
+| notify | No | `→ delivered (exit 0)` | "Banner sent. Agent keeps going." |
+| ask | Yes | `→ stdout: dev` | "Got dev from stdout. Merging..." |
+| choose | Yes | `→ chose ship (exit 1)` | "Ship selected. Last gate..." |
+| confirm | Yes | `→ approved (exit 0)` | "Approved. Running migrate.sh." |
+
+## Motion fixes
+
+- Separate `zoomIn()` / `zoomOut()` with `overwrite: "auto"` — no stuck zoom
+- `resetCamera()` at end of confirm beat
+- Pointer inside `#camera` so clicks land on notification controls during zoom
+- Status pill shows "waiting for you" while shell is blocked

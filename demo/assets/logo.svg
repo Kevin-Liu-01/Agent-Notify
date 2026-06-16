@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">Agent-Notify logo</title>
+  <defs>
+    <!-- Deep dark blue brushed metal -->
+    <linearGradient id="metal" x1="8%" y1="6%" x2="92%" y2="94%">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="20%" stop-color="#1e3a5f"/>
+      <stop offset="45%" stop-color="#0f2744"/>
+      <stop offset="72%" stop-color="#0a1628"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="depth" cx="68%" cy="92%" r="62%">
+      <stop offset="0%" stop-color="#020617" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#020617" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sheen" cx="22%" cy="12%" r="55%">
+      <stop offset="0%" stop-color="#60a5fa" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#1e3a8a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="brush" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.11"/>
+      <stop offset="11%" stop-color="#000000" stop-opacity="0.08"/>
+      <stop offset="22%" stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="33%" stop-color="#000000" stop-opacity="0.06"/>
+      <stop offset="44%" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="55%" stop-color="#000000" stop-opacity="0.05"/>
+      <stop offset="66%" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="77%" stop-color="#000000" stop-opacity="0.06"/>
+      <stop offset="88%" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="frost" x1="0%" y1="0%" x2="78%" y2="78%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.42"/>
+      <stop offset="24%" stop-color="#dbeafe" stop-opacity="0.12"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#1d4ed8" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="bevel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.38"/>
+      <stop offset="12%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="88%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#020617" stop-opacity="0.45"/>
+    </linearGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9 0.035" numOctaves="3" seed="7" result="n"/>
+      <feColorMatrix in="n" type="saturate" values="0" result="g"/>
+      <feComponentTransfer in="g" result="fine">
+        <feFuncA type="linear" slope="0.1" intercept="0"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic" in2="fine" mode="soft-light"/>
+    </filter>
+    <filter id="icon-shadow" x="-18%" y="-18%" width="136%" height="136%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#020617" flood-opacity="0.55"/>
+    </filter>
+    <clipPath id="tile">
+      <rect width="256" height="256" rx="56"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)" filter="url(#grain)">
+    <rect width="256" height="256" fill="url(#metal)"/>
+    <rect width="256" height="256" fill="url(#depth)"/>
+    <rect width="256" height="256" fill="url(#sheen)"/>
+    <rect width="256" height="256" fill="url(#brush)"/>
+    <rect width="256" height="256" fill="url(#frost)"/>
+    <rect width="256" height="256" fill="url(#bevel)"/>
+  </g>
+
+  <rect width="256" height="256" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.24" stroke-width="1.25"/>
+  <rect x="1.25" y="1.25" width="253.5" height="253.5" rx="54.75" fill="none" stroke="#93c5fd" stroke-opacity="0.16" stroke-width="1"/>
+
+  <g filter="url(#icon-shadow)">
+    <line x1="128" y1="70" x2="128" y2="42" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="128" cy="35" r="8" fill="#FFFFFF"/>
+    <path d="M128 70 C108 70 92 86 92 114 C92 138 86 154 74 164 C70 167 72 174 79 174 L177 174 C184 174 186 167 182 164 C170 154 164 138 164 114 C164 86 148 70 128 70 Z" fill="#FFFFFF"/>
+    <circle cx="128" cy="194" r="11" fill="#FFFFFF"/>
+    <circle cx="114" cy="120" r="7" fill="#1e40af"/>
+    <circle cx="142" cy="120" r="7" fill="#1e40af"/>
+    <path d="M113 140 Q128 154 143 140" fill="none" stroke="#1e40af" stroke-width="6" stroke-linecap="round"/>
+  </g>
+</svg>
