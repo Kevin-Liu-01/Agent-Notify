@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""agent-notify - reach a human out-of-band from any AI agent.
+
+An agent that is blocked - waiting on a decision, an approval, or an answer it
+cannot infer - can call this tool to ping the human through their own
+notification settings and (when asked) block for the reply. It works from any
+agent that can run a shell command: Cursor, Claude Code, Codex, OpenClaw,
+Hermes, and so on.
+
+Delivery goes through a "channel". The default channel is `system`: a native
+desktop notification or dialog (osascript on macOS, notify-send/zenity on
+Linux, PowerShell on Windows). The user can configure extra channels in
+~/.config/agent-notify/config.json - `ntfy` for phone push with a reply,
+`webhook` for Slack/Discord, or `command` to run any program they like. That
+config file is the "notification linkup" layer: the agent always calls the
+same verbs, the user decides where the ping lands.
+
+Single file, standard library only, Python 3.8+. Drop it on any PATH and go.
+Home: https://github.com/Kevin-Liu-01/Agent-Notify
+
+Exit codes (stable contract for the calling agent):
+    0    delivered / answered / approved / chosen
+    20   the human declined, denied, or dismissed
+    124  timed out with no response
+    2    usage error
+    3    transport/provider error (could not deliver)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+VERSION = "1.0.0"
+
+EXIT_OK = 0
+EXIT_DECLINED = 20
+EXIT_TIMEOUT = 124
+EXIT_USAGE = 2
+EXIT_PROVIDER = 3
+
+# Outgoing ntfy messages carry this title prefix so the reply poller can ignore
+# its own publishes when it reads the topic back.
+NTFY_OUT_PREFIX = "[agent] "
+
+
+@dataclass
+class Ask:
+    """One request from the agent to the human."""
+
+    verb: str                                       # notify|ask|confirm|choose
+    message: str
+    title: str = "Agent"
+    urgency: str = "normal"                         # low|normal|high
+    timeout: float = 120.0                          # seconds; 0 = wait forever
+    default: str = ""                               # prefilled answer (ask)
+    options: list = field(default_factory=list)     # choices (choose)
+    yes: str = "Approve"
+    no: str = "Deny"
+
+    def has_timeout(self) -> bool:
+        return bool(self.timeout and self.timeout > 0)
+
+
+@dataclass
+class Result:
+    """The outcome of a request. `status` is authoritative; exit code follows."""
+
+    status: str          # delivered|answered|approved|denied|chosen|timeout|cancelled|error
+    channel: str
+    verb: str
+    response: Optional[str] = None
+    error: Optional[str] = None
+
+    def exit_code(self) -> int:
+        return {
+            "delivered": EXIT_OK,
+            "answered": EXIT_OK,
+            "approved": EXIT_OK,
+            "chosen": EXIT_OK,
+            "denied": EXIT_DECLINED,
+            "cancelled": EXIT_DECLINED,
+            "timeout": EXIT_TIMEOUT,
+            "error": EXIT_PROVIDER,
+        }[self.status]
+
+
+class Unsupported(Exception):
+    """A channel cannot service the requested verb. We fail loud, never silently
+    fall back to a different channel - one ping, one destination."""
+
+
+# --------------------------------------------------------------------------- #
+# macOS system backend (osascript)
+# --------------------------------------------------------------------------- #
+
+def _as_str(s: str) -> str:
+    """Quote a Python string as an AppleScript string literal."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _mac_notify(req: Ask, channel: str) -> Result:
+    sound = ' sound name "Sosumi"' if req.urgency == "high" else ""
+    script = f"display notification {_as_str(req.message)} with title {_as_str(req.title)}{sound}"
+    cp = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if cp.returncode != 0:
+        return Result("error", channel, "notify", error=(cp.stderr or "").strip() or "osascript failed")
+    return Result("delivered", channel, "notify")
+
+
+def _mac_dialog(script: str, req: Ask, channel: str, verb: str,
+                on_ok: Callable[[str], Result]) -> Result:
+    # The dialog self-dismisses via `giving up after`, so give osascript a few
+    # extra seconds before we treat the subprocess itself as stuck.
+    sp_timeout = (req.timeout + 15) if req.has_timeout() else None
+    try:
+        cp = subprocess.run(["osascript", "-e", script], capture_output=True,
+                            text=True, timeout=sp_timeout)
+    except subprocess.TimeoutExpired:
+        return Result("timeout", channel, verb)
+    err = cp.stderr or ""
+    if cp.returncode != 0:
+        if "-128" in err or "User canceled" in err:        # Cancel button / Esc
+            return Result("cancelled", channel, verb)
+        return Result("error", channel, verb, error=err.strip() or "osascript failed")
+    out = (cp.stdout or "").strip()
+    if out == "GAVEUP":
+        return Result("timeout", channel, verb)
+    if out.startswith("OK:"):
+        return on_ok(out[3:])
+    if out.startswith("BTN:"):
+        return on_ok(out[4:])
+    return Result("error", channel, verb, error=f"unexpected osascript output: {out!r}")
+
+
+def _mac_ask(req: Ask, channel: str) -> Result:
+    giving = f" giving up after {int(req.timeout)}" if req.has_timeout() else ""
+    dlg = (f"display dialog {_as_str(req.message)} with title {_as_str(req.title)} "
+           f'default answer {_as_str(req.default)} buttons {{"Cancel", "Send"}} '
+           f'default button "Send"{giving}')
+    script = f'set r to ({dlg})\nif gave up of r then return "GAVEUP"\nreturn "OK:" & text returned of r'
+    return _mac_dialog(script, req, channel, "ask",
+                       lambda v: Result("answered", channel, "ask", response=v))
+
+
+def _mac_confirm(req: Ask, channel: str) -> Result:
+    giving = f" giving up after {int(req.timeout)}" if req.has_timeout() else ""
+    no_lit, yes_lit = _as_str(req.no), _as_str(req.yes)
+    dlg = (f"display dialog {_as_str(req.message)} with title {_as_str(req.title)} "
+           f"buttons {{{no_lit}, {yes_lit}}} default button {yes_lit}{giving}")
+    script = f'set r to ({dlg})\nif gave up of r then return "GAVEUP"\nreturn "BTN:" & button returned of r'
+    return _mac_dialog(script, req, channel, "confirm",
+                       lambda label: Result("approved" if label == req.yes else "denied",
+                                            channel, "confirm", response=label))
+
+
+def _mac_choose(req: Ask, channel: str) -> Result:
+    items = ", ".join(_as_str(o) for o in req.options)
+    first = _as_str(req.options[0])
+    script = (
+        f"set chosen to (choose from list {{{items}}} "
+        f"with title {_as_str(req.title)} with prompt {_as_str(req.message)} "
+        f'default items {{{first}}} OK button name "Select" cancel button name "Cancel")\n'
+        f'if chosen is false then return "CANCEL"\n'
+        f'return "OK:" & (item 1 of chosen)'
+    )
+    try:
+        cp = subprocess.run(["osascript", "-e", script], capture_output=True,
+                            text=True, timeout=(req.timeout if req.has_timeout() else None))
+    except subprocess.TimeoutExpired:
+        return Result("timeout", channel, "choose")
+    if cp.returncode != 0:
+        return Result("error", channel, "choose", error=(cp.stderr or "").strip() or "osascript failed")
+    out = (cp.stdout or "").strip()
+    if out == "CANCEL":
+        return Result("cancelled", channel, "choose")
+    if out.startswith("OK:"):
+        return Result("chosen", channel, "choose", response=out[3:])
+    return Result("error", channel, "choose", error=f"unexpected osascript output: {out!r}")
+
+
+# --------------------------------------------------------------------------- #
+# Linux system backend (notify-send / zenity / kdialog)
+# --------------------------------------------------------------------------- #
+
+def _linux_notify(req: Ask, channel: str) -> Result:
+    if not shutil.which("notify-send"):
+        return Result("error", channel, "notify", error="notify-send not found (install libnotify-bin)")
+    urgency = {"low": "low", "normal": "normal", "high": "critical"}.get(req.urgency, "normal")
+    cp = subprocess.run(["notify-send", "-u", urgency, req.title, req.message],
+                        capture_output=True, text=True)
+    if cp.returncode != 0:
+        return Result("error", channel, "notify", error=(cp.stderr or "").strip() or "notify-send failed")
+    return Result("delivered", channel, "notify")
+
+
+def _zenity(argv: list, req: Ask) -> subprocess.CompletedProcess:
+    if req.has_timeout():
+        argv = argv + ["--timeout", str(int(req.timeout))]
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def _linux_ask(req: Ask, channel: str) -> Result:
+    if shutil.which("zenity"):
+        cp = _zenity(["zenity", "--entry", "--title", req.title,
+                      "--text", req.message, "--entry-text", req.default], req)
+    elif shutil.which("kdialog"):
+        cp = subprocess.run(["kdialog", "--title", req.title, "--inputbox", req.message, req.default],
+                            capture_output=True, text=True)
+    else:
+        raise Unsupported("no zenity/kdialog found for interactive prompts on Linux")
+    if cp.returncode == 5:                                  # zenity timeout
+        return Result("timeout", channel, "ask")
+    if cp.returncode != 0:
+        return Result("cancelled", channel, "ask")
+    return Result("answered", channel, "ask", response=(cp.stdout or "").strip())
+
+
+def _linux_confirm(req: Ask, channel: str) -> Result:
+    if shutil.which("zenity"):
+        cp = _zenity(["zenity", "--question", "--title", req.title, "--text", req.message,
+                      "--ok-label", req.yes, "--cancel-label", req.no], req)
+    elif shutil.which("kdialog"):
+        cp = subprocess.run(["kdialog", "--title", req.title, "--yesno", req.message],
+                            capture_output=True, text=True)
+    else:
+        raise Unsupported("no zenity/kdialog found for interactive prompts on Linux")
+    if cp.returncode == 5:
+        return Result("timeout", channel, "confirm")
+    if cp.returncode == 0:
+        return Result("approved", channel, "confirm", response=req.yes)
+    return Result("denied", channel, "confirm", response=req.no)
+
+
+def _linux_choose(req: Ask, channel: str) -> Result:
+    if not shutil.which("zenity"):
+        raise Unsupported("choose requires zenity on Linux")
+    argv = ["zenity", "--list", "--radiolist", "--title", req.title,
+            "--text", req.message, "--column", "", "--column", "Option"]
+    for i, opt in enumerate(req.options):
+        argv += ["TRUE" if i == 0 else "FALSE", opt]
+    cp = _zenity(argv, req)
+    if cp.returncode == 5:
+        return Result("timeout", channel, "choose")
+    if cp.returncode != 0:
+        return Result("cancelled", channel, "choose")
+    return Result("chosen", channel, "choose", response=(cp.stdout or "").strip())
+
+
+# --------------------------------------------------------------------------- #
+# Windows system backend (PowerShell / WScript.Shell) - best effort
+# --------------------------------------------------------------------------- #
+
+def _powershell(script: str, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def _win_notify(req: Ask, channel: str) -> Result:
+    wait = 15 if req.urgency == "high" else 5
+    msg, title = req.message.replace('"', "'"), req.title.replace('"', "'")
+    script = f'(New-Object -ComObject WScript.Shell).Popup("{msg}", {wait}, "{title}", 64) | Out-Null'
+    cp = _powershell(script)
+    if cp.returncode != 0:
+        return Result("error", channel, "notify", error=(cp.stderr or "").strip() or "powershell failed")
+    return Result("delivered", channel, "notify")
+
+
+def _win_ask(req: Ask, channel: str) -> Result:
+    msg, title, dflt = (s.replace('"', "'") for s in (req.message, req.title, req.default))
+    script = ('Add-Type -AssemblyName Microsoft.VisualBasic;'
+              f'[Microsoft.VisualBasic.Interaction]::InputBox("{msg}", "{title}", "{dflt}")')
+    try:
+        cp = _powershell(script, timeout=(req.timeout if req.has_timeout() else None))
+    except subprocess.TimeoutExpired:
+        return Result("timeout", channel, "ask")
+    if cp.returncode != 0:
+        return Result("error", channel, "ask", error=(cp.stderr or "").strip() or "powershell failed")
+    answer = (cp.stdout or "").strip()
+    if answer == "":
+        return Result("cancelled", channel, "ask")
+    return Result("answered", channel, "ask", response=answer)
+
+
+def _win_confirm(req: Ask, channel: str) -> Result:
+    wait = int(req.timeout) if req.has_timeout() else 0
+    msg, title = req.message.replace('"', "'"), req.title.replace('"', "'")
+    # Popup type 36 = Yes/No (4) + question icon (32). Returns 6=Yes, 7=No, -1=timeout.
+    script = f'(New-Object -ComObject WScript.Shell).Popup("{msg}", {wait}, "{title}", 36)'
+    cp = _powershell(script)
+    code = (cp.stdout or "").strip()
+    if code == "6":
+        return Result("approved", channel, "confirm", response=req.yes)
+    if code == "-1":
+        return Result("timeout", channel, "confirm")
+    return Result("denied", channel, "confirm", response=req.no)
+
+
+# Platform -> verb dispatch tables for the system channel.
+_MAC = {"notify": _mac_notify, "ask": _mac_ask, "confirm": _mac_confirm, "choose": _mac_choose}
+_LINUX = {"notify": _linux_notify, "ask": _linux_ask, "confirm": _linux_confirm, "choose": _linux_choose}
+_WIN = {"notify": _win_notify, "ask": _win_ask, "confirm": _win_confirm}
+
+
+# --------------------------------------------------------------------------- #
+# Channels
+# --------------------------------------------------------------------------- #
+
+class Channel:
+    type = "base"
+
+    def __init__(self, name: str, cfg: dict):
+        self.name = name
+        self.cfg = cfg
+
+    def handle(self, req: Ask) -> Result:
+        return getattr(self, req.verb)(req)
+
+    def notify(self, req: Ask) -> Result:
+        raise Unsupported(f"channel '{self.name}' ({self.type}) cannot notify")
+
+    def ask(self, req: Ask) -> Result:
+        raise Unsupported(f"channel '{self.name}' ({self.type}) cannot ask")
+
+    def confirm(self, req: Ask) -> Result:
+        raise Unsupported(f"channel '{self.name}' ({self.type}) cannot confirm")
+
+    def choose(self, req: Ask) -> Result:
+        raise Unsupported(f"channel '{self.name}' ({self.type}) cannot choose")
+
+
+class SystemChannel(Channel):
+    """Native desktop notification / dialog on the machine the agent runs on."""
+
+    type = "system"
+
+    def _table(self) -> dict:
+        host = platform.system()
+        table = {"Darwin": _MAC, "Linux": _LINUX, "Windows": _WIN}.get(host)
+        if table is None:
+            raise Unsupported(f"system channel does not support OS '{host}'")
+        return table
+
+    def _dispatch(self, verb: str, req: Ask) -> Result:
+        fn = self._table().get(verb)
+        if fn is None:
+            raise Unsupported(f"system channel cannot '{verb}' on {platform.system()} "
+                              "(no GUI helper available); configure a remote channel instead")
+        return fn(req, self.name)
+
+    def notify(self, req): return self._dispatch("notify", req)
+    def ask(self, req): return self._dispatch("ask", req)
+    def confirm(self, req): return self._dispatch("confirm", req)
+    def choose(self, req): return self._dispatch("choose", req)
+
+
+class NtfyChannel(Channel):
+    """Push to an ntfy.sh topic; read the human's reply back off the same topic.
+
+    Great for "the user is away from the keyboard but has their phone": they get
+    a push notification and reply to the topic from the ntfy app.
+    """
+
+    type = "ntfy"
+
+    def _server(self) -> str:
+        return self.cfg.get("server", "https://ntfy.sh").rstrip("/")
+
+    def _topic(self) -> str:
+        topic = self.cfg.get("topic")
+        if not topic:
+            raise Unsupported(f"channel '{self.name}': ntfy requires a 'topic'")
+        return topic
+
+    def _auth(self) -> dict:
+        token = self.cfg.get("token")
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def _publish(self, body: str, req: Ask) -> None:
+        headers = dict(self._auth())
+        headers["Title"] = NTFY_OUT_PREFIX + req.title
+        headers["Priority"] = {"low": "low", "normal": "default", "high": "high"}.get(req.urgency, "default")
+        request = urllib.request.Request(f"{self._server()}/{self._topic()}",
+                                         data=body.encode("utf-8"), headers=headers, method="POST")
+        urllib.request.urlopen(request, timeout=15).read()
+
+    def _poll(self, since: float, deadline: float) -> Optional[str]:
+        url = f"{self._server()}/{self._topic()}/json?since={int(since)}"
+        while time.time() < deadline:
+            try:
+                request = urllib.request.Request(url, headers=self._auth())
+                window = min(max(deadline - time.time(), 1), 30)
+                with urllib.request.urlopen(request, timeout=window) as resp:
+                    for raw in resp:
+                        if time.time() >= deadline:
+                            return None
+                        reply = self._reply_from(raw)
+                        if reply is not None:
+                            return reply
+            except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError):
+                time.sleep(1)
+        return None
+
+    @staticmethod
+    def _reply_from(raw: bytes) -> Optional[str]:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            return None
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if msg.get("event") != "message":
+            return None
+        if str(msg.get("title", "")).startswith(NTFY_OUT_PREFIX):  # ignore our own publish
+            return None
+        return msg.get("message") or None
+
+    def notify(self, req: Ask) -> Result:
+        try:
+            self._publish(req.message, req)
+            return Result("delivered", self.name, "notify")
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "notify", error=f"ntfy publish failed: {exc}")
+
+    def _round_trip(self, body: str, req: Ask) -> Optional[str]:
+        start = time.time()
+        self._publish(body, req)
+        deadline = start + (req.timeout if req.has_timeout() else 86400)
+        return self._poll(start, deadline)
+
+    def ask(self, req: Ask) -> Result:
+        body = f"{req.message}\n\nReply to this topic to answer."
+        try:
+            reply = self._round_trip(body, req)
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "ask", error=f"ntfy ask failed: {exc}")
+        if reply is None:
+            return Result("timeout", self.name, "ask")
+        return Result("answered", self.name, "ask", response=reply)
+
+    def confirm(self, req: Ask) -> Result:
+        body = f"{req.message}\n\nReply '{req.yes}'/yes to approve or '{req.no}'/no to deny."
+        try:
+            reply = self._round_trip(body, req)
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "confirm", error=f"ntfy confirm failed: {exc}")
+        if reply is None:
+            return Result("timeout", self.name, "confirm")
+        value = reply.strip().lower()
+        approve = {"y", "yes", "approve", "ok", "1", "true", "yep", "yeah"} | {req.yes.lower()}
+        if value in approve:
+            return Result("approved", self.name, "confirm", response=reply)
+        return Result("denied", self.name, "confirm", response=reply)   # fail-closed on anything else
+
+    def choose(self, req: Ask) -> Result:
+        listing = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(req.options))
+        body = f"{req.message}\n\n{listing}\n\nReply with the number or the text."
+        try:
+            reply = self._round_trip(body, req)
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "choose", error=f"ntfy choose failed: {exc}")
+        if reply is None:
+            return Result("timeout", self.name, "choose")
+        picked = self._match_choice(reply.strip(), req.options)
+        if picked is None:
+            return Result("cancelled", self.name, "choose", response=reply)
+        return Result("chosen", self.name, "choose", response=picked)
+
+    @staticmethod
+    def _match_choice(reply: str, options: list) -> Optional[str]:
+        if reply.isdigit() and 1 <= int(reply) <= len(options):
+            return options[int(reply) - 1]
+        for opt in options:
+            if reply.lower() == opt.lower():
+                return opt
+        return None
+
+
+class WebhookChannel(Channel):
+    """One-way HTTP POST. Defaults to a Slack-style {"text": ...} body."""
+
+    type = "webhook"
+
+    def notify(self, req: Ask) -> Result:
+        url = self.cfg.get("url")
+        if not url:
+            raise Unsupported(f"channel '{self.name}': webhook requires a 'url'")
+        template = self.cfg.get("body")
+        if template:
+            data = template.format(message=req.message, title=req.title).encode("utf-8")
+            content_type = self.cfg.get("content_type", "application/json")
+        else:
+            data = json.dumps({"text": f"{req.title}: {req.message}"}).encode("utf-8")
+            content_type = "application/json"
+        try:
+            request = urllib.request.Request(url, data=data, method="POST",
+                                             headers={"Content-Type": content_type})
+            for key, value in (self.cfg.get("headers") or {}).items():
+                request.add_header(key, value)
+            urllib.request.urlopen(request, timeout=15).read()
+            return Result("delivered", self.name, "notify")
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "notify", error=f"webhook failed: {exc}")
+
+
+class CommandChannel(Channel):
+    """Run a user-defined program per verb. The escape hatch for anything the
+    other channels do not cover (say, terminal-notifier, a Telegram CLI, a
+    text-to-speech command). Placeholders {message} {title} {default} {options}
+    are substituted into argv and optional stdin."""
+
+    type = "command"
+
+    def _argv(self, verb: str, req: Ask) -> list:
+        spec = self.cfg.get(verb)
+        if not spec:
+            raise Unsupported(f"channel '{self.name}': command channel has no '{verb}' configured")
+        return [self._fmt(arg, req) for arg in spec]
+
+    @staticmethod
+    def _fmt(text: str, req: Ask) -> str:
+        return text.format(message=req.message, title=req.title,
+                           default=req.default, options=", ".join(req.options))
+
+    def _run(self, verb: str, req: Ask) -> subprocess.CompletedProcess:
+        stdin = self.cfg.get("stdin")
+        return subprocess.run(self._argv(verb, req), capture_output=True, text=True,
+                              input=(self._fmt(stdin, req) if stdin else None),
+                              timeout=(req.timeout if req.has_timeout() else None))
+
+    def notify(self, req: Ask) -> Result:
+        cp = self._run("notify", req)
+        if cp.returncode != 0:
+            return Result("error", self.name, "notify", error=(cp.stderr or "").strip() or "command failed")
+        return Result("delivered", self.name, "notify")
+
+    def ask(self, req: Ask) -> Result:
+        try:
+            cp = self._run("ask", req)
+        except subprocess.TimeoutExpired:
+            return Result("timeout", self.name, "ask")
+        if cp.returncode != 0:
+            return Result("cancelled", self.name, "ask")
+        return Result("answered", self.name, "ask", response=(cp.stdout or "").strip())
+
+    def confirm(self, req: Ask) -> Result:
+        try:
+            cp = self._run("confirm", req)
+        except subprocess.TimeoutExpired:
+            return Result("timeout", self.name, "confirm")
+        if cp.returncode == 0:
+            return Result("approved", self.name, "confirm", response=req.yes)
+        return Result("denied", self.name, "confirm", response=req.no)
+
+    def choose(self, req: Ask) -> Result:
+        try:
+            cp = self._run("choose", req)
+        except subprocess.TimeoutExpired:
+            return Result("timeout", self.name, "choose")
+        if cp.returncode != 0:
+            return Result("cancelled", self.name, "choose")
+        return Result("chosen", self.name, "choose", response=(cp.stdout or "").strip())
+
+
+_CHANNEL_TYPES = {
+    "system": SystemChannel,
+    "ntfy": NtfyChannel,
+    "webhook": WebhookChannel,
+    "command": CommandChannel,
+}
+
+
+# --------------------------------------------------------------------------- #
+# Config + dispatch
+# --------------------------------------------------------------------------- #
+
+def config_path() -> Path:
+    env = os.environ.get("AGENT_NOTIFY_CONFIG")
+    if env:
+        return Path(env).expanduser()
+    base = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
+    return Path(base).expanduser() / "agent-notify" / "config.json"
+
+
+def load_config() -> dict:
+    path = config_path()
+    if not path.is_file():
+        return {"default_channel": "system", "channels": {"system": {"type": "system"}}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.setdefault("default_channel", "system")
+    data.setdefault("channels", {}).setdefault("system", {"type": "system"})
+    return data
+
+
+def make_channel(name: str, conf: dict) -> Channel:
+    channels = conf.get("channels", {})
+    spec = channels.get(name)
+    if spec is None:
+        raise Unsupported(f"unknown channel '{name}' (configured: {', '.join(channels) or 'none'})")
+    cls = _CHANNEL_TYPES.get(spec.get("type", "system"))
+    if cls is None:
+        raise Unsupported(f"unknown channel type '{spec.get('type')}' for '{name}'")
+    return cls(name, spec)
+
+
+def capabilities(spec: dict) -> list:
+    kind = spec.get("type", "system")
+    if kind == "system":
+        host = platform.system()
+        if host == "Darwin" and shutil.which("osascript"):
+            return ["notify", "ask", "confirm", "choose"]
+        if host == "Linux":
+            caps = ["notify"] if shutil.which("notify-send") else []
+            if shutil.which("zenity"):
+                caps += ["ask", "confirm", "choose"]
+            elif shutil.which("kdialog"):
+                caps += ["ask", "confirm"]
+            return caps
+        if host == "Windows" and shutil.which("powershell"):
+            return ["notify", "ask", "confirm"]
+        return []
+    if kind == "ntfy":
+        return ["notify", "ask", "confirm", "choose"] if spec.get("topic") else ["(needs 'topic')"]
+    if kind == "command":
+        return [v for v in ("notify", "ask", "confirm", "choose") if spec.get(v)]
+    if kind == "webhook":
+        return ["notify"] if spec.get("url") else ["(needs 'url')"]
+    return ["(unknown type)"]
+
+
+def cmd_doctor(conf: dict) -> int:
+    found = config_path().is_file()
+    print(f"agent-notify {VERSION}")
+    print(f"os:       {platform.system()} ({platform.machine()}), python {platform.python_version()}")
+    print(f"config:   {config_path()} {'(found)' if found else '(absent -> built-in system default)'}")
+    print("backends: " + ", ".join(
+        f"{tool}={'yes' if shutil.which(tool) else 'no'}"
+        for tool in ("osascript", "notify-send", "zenity", "kdialog", "powershell")))
+    print(f"default:  {conf['default_channel']}")
+    print("channels:")
+    for name, spec in conf["channels"].items():
+        caps = ", ".join(capabilities(spec)) or "(none)"
+        print(f"  - {name} [{spec.get('type', 'system')}]: {caps}")
+    return EXIT_OK
+
+
+def emit(res: Result, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({"status": res.status, "verb": res.verb, "channel": res.channel,
+                          "response": res.response, "error": res.error}))
+        return res.exit_code()
+    if res.status == "error":
+        print(res.error or "error", file=sys.stderr)
+    elif res.verb == "confirm":
+        print(res.status)                                  # approved|denied|timeout|cancelled
+    elif res.response is not None:
+        print(res.response)
+    elif res.status in ("timeout", "cancelled"):
+        print(res.status, file=sys.stderr)
+    return res.exit_code()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agent-notify",
+        description="Reach a human out-of-band from any AI agent: notify, ask, confirm, choose.")
+    parser.add_argument("--version", action="version", version=f"agent-notify {VERSION}")
+    sub = parser.add_subparsers(dest="verb", required=True)
+
+    def shared(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--title", default="Agent", help="notification title")
+        sp.add_argument("--channel", default=None, help="channel name from config (default: configured default)")
+        sp.add_argument("--urgency", choices=["low", "normal", "high"], default="normal")
+        sp.add_argument("--json", action="store_true", help="emit a JSON result object")
+
+    p_notify = sub.add_parser("notify", help="fire-and-forget notification")
+    p_notify.add_argument("message")
+    shared(p_notify)
+
+    p_ask = sub.add_parser("ask", help="ask a free-text question and print the answer")
+    p_ask.add_argument("message")
+    p_ask.add_argument("--default", default="", help="prefilled answer")
+    p_ask.add_argument("--timeout", type=float, default=120.0, help="seconds to wait (0 = forever)")
+    shared(p_ask)
+
+    p_confirm = sub.add_parser("confirm", help="ask for approval; exit 0=approved, 20=denied")
+    p_confirm.add_argument("message")
+    p_confirm.add_argument("--yes", default="Approve", help="approve button label")
+    p_confirm.add_argument("--no", default="Deny", help="deny button label")
+    p_confirm.add_argument("--timeout", type=float, default=120.0)
+    shared(p_confirm)
+
+    p_choose = sub.add_parser("choose", help="pick one of several options")
+    p_choose.add_argument("message")
+    p_choose.add_argument("--option", action="append", default=[], dest="options",
+                          help="an option (repeat for each; at least 2)")
+    p_choose.add_argument("--timeout", type=float, default=120.0)
+    shared(p_choose)
+
+    sub.add_parser("doctor", help="report platform, backends, and configured channels")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    conf = load_config()
+    if args.verb == "doctor":
+        return cmd_doctor(conf)
+    if args.verb == "choose" and len(args.options) < 2:
+        print("choose needs at least two --option values", file=sys.stderr)
+        return EXIT_USAGE
+
+    req = Ask(verb=args.verb, message=args.message, title=args.title, urgency=args.urgency,
+              timeout=getattr(args, "timeout", 0.0), default=getattr(args, "default", ""),
+              options=getattr(args, "options", []),
+              yes=getattr(args, "yes", "Approve"), no=getattr(args, "no", "Deny"))
+    channel_name = args.channel or conf["default_channel"]
+    try:
+        res = make_channel(channel_name, conf).handle(req)
+    except Unsupported as exc:
+        res = Result("error", channel_name, args.verb, error=str(exc))
+    except Exception as exc:                                       # noqa: BLE001
+        res = Result("error", channel_name, args.verb, error=f"{type(exc).__name__}: {exc}")
+    return emit(res, args.json)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
