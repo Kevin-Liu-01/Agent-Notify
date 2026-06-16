@@ -18,6 +18,22 @@
       "_comment": "Subscribe to this topic in the ntfy app. You get a push; reply to the topic and the agent reads it back. Use --channel phone, or set this as default_channel on headless boxes."
     },
 
+    "iphone": {
+      "type": "imessage",
+      "to": "+15551234567",
+      "service": "iMessage",
+      "_comment": "macOS only, uses YOUR Messages account (no API key, no fee). 'to' is a phone number or Apple ID; set service to 'SMS' to relay through a connected iPhone (Text Message Forwarding). Two-way: send a question and the agent reads your reply back from the Messages database. One-time setup: sign in to Messages; allow your terminal/agent to control Messages (System Settings > Privacy & Security > Automation) to send; grant it Full Disk Access to read replies. With Full Disk Access it also confirms delivery and reports a 'Not Delivered' as an error; add \"verify\": false to skip that check, \"verify_timeout\": 6 to bound the wait."
+    },
+
+    "sms": {
+      "type": "sms",
+      "account_sid": "",
+      "auth_token": "",
+      "from": "+15550000000",
+      "to": "+15551234567",
+      "_comment": "Outbound SMS via Twilio (the external-provider path; reaches non-Apple phones and works from a non-Mac host). notify only. Leave account_sid/auth_token blank here and set $TWILIO_ACCOUNT_SID / $TWILIO_AUTH_TOKEN in the environment to keep secrets out of the file. 'from' is your Twilio number, 'to' is the recipient."
+    },
+
     "slack": {
       "type": "webhook",
       "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",

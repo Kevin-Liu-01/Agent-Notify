@@ -29,15 +29,19 @@ Exit codes (stable contract for the calling agent):
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import platform
+import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +58,10 @@ EXIT_PROVIDER = 3
 # Outgoing ntfy messages carry this title prefix so the reply poller can ignore
 # its own publishes when it reads the topic back.
 NTFY_OUT_PREFIX = "[agent] "
+
+# macOS Messages stores message dates as nanoseconds since 2001-01-01 UTC. This
+# is that instant in Unix seconds, used to translate our wall clock to its clock.
+APPLE_EPOCH = 978307200
 
 
 @dataclass
@@ -315,6 +323,30 @@ _WIN = {"notify": _win_notify, "ask": _win_ask, "confirm": _win_confirm}
 
 
 # --------------------------------------------------------------------------- #
+# Shared reply parsing (used by every channel that reads a free-text reply back)
+# --------------------------------------------------------------------------- #
+
+# Words that count as "yes" for a confirm, in addition to the channel's own
+# approve label. Anything not in this set is fail-closed to a denial.
+_APPROVE_WORDS = {"y", "yes", "approve", "ok", "okay", "1", "true", "yep", "yeah", "sure"}
+
+
+def _is_approval(reply: str, yes_label: str) -> bool:
+    return reply.strip().lower() in (_APPROVE_WORDS | {yes_label.strip().lower()})
+
+
+def _match_choice(reply: str, options: list) -> Optional[str]:
+    """Map a human's reply to one option: a 1-based index or the option text."""
+    reply = reply.strip()
+    if reply.isdigit() and 1 <= int(reply) <= len(options):
+        return options[int(reply) - 1]
+    for opt in options:
+        if reply.lower() == opt.lower():
+            return opt
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Channels
 # --------------------------------------------------------------------------- #
 
@@ -459,9 +491,7 @@ class NtfyChannel(Channel):
             return Result("error", self.name, "confirm", error=f"ntfy confirm failed: {exc}")
         if reply is None:
             return Result("timeout", self.name, "confirm")
-        value = reply.strip().lower()
-        approve = {"y", "yes", "approve", "ok", "1", "true", "yep", "yeah"} | {req.yes.lower()}
-        if value in approve:
+        if _is_approval(reply, req.yes):
             return Result("approved", self.name, "confirm", response=reply)
         return Result("denied", self.name, "confirm", response=reply)   # fail-closed on anything else
 
@@ -474,19 +504,10 @@ class NtfyChannel(Channel):
             return Result("error", self.name, "choose", error=f"ntfy choose failed: {exc}")
         if reply is None:
             return Result("timeout", self.name, "choose")
-        picked = self._match_choice(reply.strip(), req.options)
+        picked = _match_choice(reply, req.options)
         if picked is None:
             return Result("cancelled", self.name, "choose", response=reply)
         return Result("chosen", self.name, "choose", response=picked)
-
-    @staticmethod
-    def _match_choice(reply: str, options: list) -> Optional[str]:
-        if reply.isdigit() and 1 <= int(reply) <= len(options):
-            return options[int(reply) - 1]
-        for opt in options:
-            if reply.lower() == opt.lower():
-                return opt
-        return None
 
 
 class WebhookChannel(Channel):
@@ -621,12 +642,310 @@ class BannerChannel(Channel):
         return Result("delivered", self.name, "notify")
 
 
+def _same_handle(want: str, got: str) -> bool:
+    """True if two Messages handles are the same person. Emails compare exactly;
+    phone numbers compare by their last 10 digits so +1 / spacing don't matter."""
+    want, got = want.strip(), got.strip()
+    if "@" in want or "@" in got:
+        return want.lower() == got.lower()
+    digits_want = re.sub(r"\D", "", want)[-10:]
+    digits_got = re.sub(r"\D", "", got)[-10:]
+    return bool(digits_want) and digits_want == digits_got
+
+
+def _attributed_text(blob) -> str:
+    """Best-effort plain text from a Messages `attributedBody` blob. Newer macOS
+    leaves the `text` column NULL and stores the body as an NSAttributedString
+    typedstream; the readable string sits right after the 'NSString'/'+' marker,
+    length-prefixed. Returns '' if it cannot be decoded (the text column covers
+    the common case), so this never raises into the poll loop."""
+    if not blob:
+        return ""
+    try:
+        data = bytes(blob)
+        marker = data.find(b"NSString")
+        if marker == -1:
+            return ""
+        plus = data.find(b"+", marker)
+        if plus == -1 or plus + 1 >= len(data):
+            return ""
+        i = plus + 1
+        length = data[i]
+        i += 1
+        if length == 0x81:                       # 2-byte little-endian length follows
+            if i + 2 > len(data):
+                return ""
+            length = int.from_bytes(data[i:i + 2], "little")
+            i += 2
+        return data[i:i + length].decode("utf-8", "replace").strip()
+    except Exception:                            # noqa: BLE001 -- backstop, never fatal
+        return ""
+
+
+def _imessage_error(stderr: str) -> Unsupported:
+    """Turn an osascript failure into a typed error that names the fix."""
+    s = (stderr or "").strip()
+    low = s.lower()
+    if "-1743" in s or "not authorized" in low:
+        return Unsupported(
+            "Messages automation is not authorized. Grant your terminal/agent permission "
+            "in System Settings > Privacy & Security > Automation (allow controlling "
+            "Messages). Note: messages cannot be sent from an SSH session.")
+    if "-10000" in s or "handler failed" in low:
+        return Unsupported(
+            "Messages refused the send (-10000). Open Messages.app, sign in to iMessage, "
+            "and text this recipient once by hand; then approve the Automation prompt.")
+    return Unsupported(s or "osascript failed to send via Messages")
+
+
+class IMessageChannel(Channel):
+    """Send through the macOS Messages app under your own iMessage/SMS account, to
+    any phone number or Apple ID. Outbound uses AppleScript (a direct buddy send,
+    which sidesteps the macOS 26 group "ghost row" bug). The blocking verbs read
+    your reply back from ~/Library/Messages/chat.db, so it is fully two-way like
+    ntfy -- you answer from your phone and the agent unblocks.
+
+    Requires (one time): Messages signed in to iMessage; Automation permission for
+    your terminal/agent to control Messages (to send); Full Disk Access for your
+    terminal/agent (to read replies). macOS only.
+    """
+
+    type = "imessage"
+
+    def _to(self) -> str:
+        to = self.cfg.get("to")
+        if not to:
+            raise Unsupported(f"channel '{self.name}': imessage requires a 'to' (phone or Apple ID)")
+        return str(to)
+
+    def _service(self) -> str:
+        svc = self.cfg.get("service", "iMessage")
+        if svc not in ("iMessage", "SMS"):
+            raise Unsupported(f"channel '{self.name}': service must be 'iMessage' or 'SMS', got {svc!r}")
+        return svc
+
+    def _send(self, body: str) -> None:
+        if platform.system() != "Darwin":
+            raise Unsupported(f"channel '{self.name}': imessage is macOS only")
+        script = (
+            "on run argv\n"
+            "  set toHandle to item 1 of argv\n"
+            "  set msg to item 2 of argv\n"
+            "  tell application \"Messages\"\n"
+            f"    set targetService to id of 1st account whose service type = {self._service()}\n"
+            "    set theBuddy to participant toHandle of account id targetService\n"
+            "    send msg to theBuddy\n"
+            "  end tell\n"
+            "end run\n"
+        )
+        start = time.time()
+        cp = subprocess.run(["osascript", "-e", script, self._to(), body],
+                            capture_output=True, text=True)
+        if cp.returncode != 0:
+            raise _imessage_error(cp.stderr)
+        self._verify_delivery(start)
+
+    def _verify_delivery(self, start_unix: float) -> None:
+        """AppleScript's `send` returns success once Messages *accepts* the send,
+        not once Apple *delivers* it -- a wrong number or a recipient who isn't on
+        iMessage still shows "Not Delivered" in the app. When chat.db is readable
+        (Full Disk Access), watch the outgoing row and raise if Messages flags a
+        send error, so we never report a false 'delivered'. Without Full Disk
+        Access we cannot check, so we stay quiet rather than lie either way.
+        Disable with "verify": false; bound the wait with "verify_timeout"."""
+        if self.cfg.get("verify") is False:
+            return
+        db = Path.home() / "Library" / "Messages" / "chat.db"
+        if not db.is_file():
+            return
+        cutoff_ns = int((start_unix - APPLE_EPOCH) * 1_000_000_000)
+        target = self._to()
+        deadline = time.time() + float(self.cfg.get("verify_timeout", 6))
+        while time.time() < deadline:
+            try:
+                state = self._outgoing_state(db, cutoff_ns, target)
+            except sqlite3.OperationalError:
+                return                               # no Full Disk Access: cannot verify
+            if state is not None:
+                error_code, delivered = state
+                if error_code:
+                    raise RuntimeError(
+                        f"Messages could not deliver to {target} (error {error_code}). Check the "
+                        "number/Apple ID is correct and reachable on iMessage.")
+                if delivered:
+                    return
+            time.sleep(0.4)
+
+    @staticmethod
+    def _outgoing_state(db: Path, cutoff_ns: int, target: str) -> Optional[tuple]:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT m.error, m.is_delivered, h.id FROM message m "
+                "JOIN handle h ON m.handle_id = h.ROWID "
+                "WHERE m.is_from_me = 1 AND m.date > ? ORDER BY m.date DESC LIMIT 10",
+                (cutoff_ns,)).fetchall()
+        finally:
+            con.close()
+        for error_code, delivered, handle in rows:
+            if _same_handle(target, handle or ""):
+                return (error_code or 0, bool(delivered))
+        return None
+
+    def _reply_after(self, start_unix: float, deadline: float) -> Optional[str]:
+        db = Path.home() / "Library" / "Messages" / "chat.db"
+        if not db.is_file():
+            raise Unsupported(f"channel '{self.name}': Messages database not found at {db}")
+        cutoff_ns = int((start_unix - APPLE_EPOCH) * 1_000_000_000)
+        interval = float(self.cfg.get("poll_interval", 3))
+        while time.time() < deadline:
+            reply = self._latest_reply(db, cutoff_ns)
+            if reply:
+                return reply
+            time.sleep(max(min(interval, deadline - time.time()), 0))
+        return None
+
+    def _latest_reply(self, db: Path, cutoff_ns: int) -> Optional[str]:
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT m.text, m.attributedBody, h.id FROM message m "
+                    "JOIN handle h ON m.handle_id = h.ROWID "
+                    "WHERE m.is_from_me = 0 AND m.date > ? ORDER BY m.date ASC",
+                    (cutoff_ns,)).fetchall()
+            finally:
+                con.close()
+        except sqlite3.OperationalError as exc:
+            raise Unsupported(
+                f"channel '{self.name}': cannot read the Messages database ({exc}). Grant Full "
+                "Disk Access to your terminal/agent in System Settings > Privacy & Security.")
+        target = self._to()
+        for text, attr, handle in rows:
+            if not _same_handle(target, handle or ""):
+                continue
+            body = (text or "").strip() or _attributed_text(attr)
+            if body:
+                return body.strip()
+        return None
+
+    def _round_trip(self, body: str, req: Ask) -> Optional[str]:
+        start = time.time()
+        self._send(body)
+        deadline = start + (req.timeout if req.has_timeout() else 86400)
+        return self._reply_after(start, deadline)
+
+    def notify(self, req: Ask) -> Result:
+        try:
+            self._send(req.message)
+        except Unsupported:
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "notify", error=f"imessage send failed: {exc}")
+        return Result("delivered", self.name, "notify")
+
+    def ask(self, req: Ask) -> Result:
+        try:
+            reply = self._round_trip(f"{req.message}\n\nReply to this message to answer.", req)
+        except Unsupported:
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "ask", error=f"imessage ask failed: {exc}")
+        if reply is None:
+            return Result("timeout", self.name, "ask")
+        return Result("answered", self.name, "ask", response=reply)
+
+    def confirm(self, req: Ask) -> Result:
+        body = f"{req.message}\n\nReply '{req.yes}'/yes to approve or '{req.no}'/no to deny."
+        try:
+            reply = self._round_trip(body, req)
+        except Unsupported:
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "confirm", error=f"imessage confirm failed: {exc}")
+        if reply is None:
+            return Result("timeout", self.name, "confirm")
+        if _is_approval(reply, req.yes):
+            return Result("approved", self.name, "confirm", response=reply)
+        return Result("denied", self.name, "confirm", response=reply)
+
+    def choose(self, req: Ask) -> Result:
+        listing = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(req.options))
+        body = f"{req.message}\n\n{listing}\n\nReply with the number or the text."
+        try:
+            reply = self._round_trip(body, req)
+        except Unsupported:
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "choose", error=f"imessage choose failed: {exc}")
+        if reply is None:
+            return Result("timeout", self.name, "choose")
+        picked = _match_choice(reply, req.options)
+        if picked is None:
+            return Result("cancelled", self.name, "choose", response=reply)
+        return Result("chosen", self.name, "choose", response=picked)
+
+
+def _twilio_error(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = json.loads(exc.read() or b"{}")
+        return body.get("message") or f"HTTP {exc.code}"
+    except Exception:                                              # noqa: BLE001
+        return f"HTTP {getattr(exc, 'code', '?')}"
+
+
+class SMSChannel(Channel):
+    """Outbound SMS through Twilio's REST API: the external-provider path for
+    reaching a phone that is not on iMessage, or for sending from a non-Mac /
+    headless host. Notify only -- inbound SMS needs a public webhook, which is out
+    of scope; use `imessage` (macOS) or `ntfy` (any OS) when you need the reply.
+
+    Config keys (or the matching env vars, so secrets can stay out of the file):
+    account_sid/$TWILIO_ACCOUNT_SID, auth_token/$TWILIO_AUTH_TOKEN,
+    from/$TWILIO_FROM (your Twilio number), to/$TWILIO_TO (the recipient).
+    """
+
+    type = "sms"
+    API = "https://api.twilio.com/2010-04-01"
+
+    def _need(self, key: str, env: str) -> str:
+        val = self.cfg.get(key) or os.environ.get(env)
+        if not val:
+            raise Unsupported(f"channel '{self.name}': sms requires '{key}' in config or ${env}")
+        return str(val)
+
+    def notify(self, req: Ask) -> Result:
+        sid = self._need("account_sid", "TWILIO_ACCOUNT_SID")
+        token = self._need("auth_token", "TWILIO_AUTH_TOKEN")
+        frm = self._need("from", "TWILIO_FROM")
+        to = self._need("to", "TWILIO_TO")
+        text = req.message if req.title in ("", "Agent") else f"{req.title}: {req.message}"
+        data = urllib.parse.urlencode({"From": frm, "To": to, "Body": text}).encode("utf-8")
+        url = f"{self.API}/Accounts/{urllib.parse.quote(sid)}/Messages.json"
+        auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
+        request = urllib.request.Request(url, data=data, method="POST",
+                                         headers={"Authorization": f"Basic {auth}"})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as resp:
+                payload = json.loads(resp.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            return Result("error", self.name, "notify", error=f"twilio: {_twilio_error(exc)}")
+        except Exception as exc:                                   # noqa: BLE001
+            return Result("error", self.name, "notify", error=f"twilio request failed: {exc}")
+        if payload.get("status") in ("failed", "undelivered"):
+            return Result("error", self.name, "notify",
+                          error=f"twilio status {payload.get('status')}: {payload.get('error_message')}")
+        return Result("delivered", self.name, "notify")
+
+
 _CHANNEL_TYPES = {
     "system": SystemChannel,
     "ntfy": NtfyChannel,
     "webhook": WebhookChannel,
     "command": CommandChannel,
     "banner": BannerChannel,
+    "imessage": IMessageChannel,
+    "sms": SMSChannel,
 }
 
 
@@ -709,6 +1028,15 @@ def capabilities(spec: dict) -> list:
         return ["notify"] if shutil.which("terminal-notifier") or spec.get("terminal_notifier") else ["(needs terminal-notifier)"]
     if kind == "webhook":
         return ["notify"] if spec.get("url") else ["(needs 'url')"]
+    if kind == "imessage":
+        if platform.system() != "Darwin":
+            return ["(macOS only)"]
+        return ["notify", "ask", "confirm", "choose"] if spec.get("to") else ["(needs 'to')"]
+    if kind == "sms":
+        have_id = spec.get("account_sid") or os.environ.get("TWILIO_ACCOUNT_SID")
+        have_from = spec.get("from") or os.environ.get("TWILIO_FROM")
+        have_to = spec.get("to") or os.environ.get("TWILIO_TO")
+        return ["notify"] if (have_id and have_from and have_to) else ["notify (needs account_sid/from/to)"]
     return ["(unknown type)"]
 
 

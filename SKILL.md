@@ -91,6 +91,8 @@ via `~/.config/agent-notify/config.json`. Built-in channel types:
 
 - `system` (default, zero-config): native desktop notification/dialog.
 - `ntfy`: push to a phone via [ntfy](https://ntfy.sh); the user replies from the ntfy app and you read it back. Best for "user is away from the keyboard."
+- `imessage` (macOS): text the user's own number/Apple ID through Messages; two-way (reads their reply back from the Messages database). Needs a one-time Automation + Full Disk Access grant; fails loud if missing.
+- `sms`: outbound SMS via Twilio (notify only) for non-Apple phones or a non-Mac host.
 - `webhook`: one-way POST (Slack/Discord/custom).
 - `command`: run any program the user wires up (terminal-notifier, a Telegram CLI, text-to-speech...).
 

@@ -128,6 +128,8 @@ To add more destinations, create `~/.config/agent-notify/config.json`
   "channels": {
     "system": { "type": "system" },
     "phone":  { "type": "ntfy", "topic": "my-unguessable-topic-x9f2" },
+    "iphone": { "type": "imessage", "to": "+15551234567" },
+    "sms":    { "type": "sms", "from": "+15550000000", "to": "+15551234567" },
     "slack":  { "type": "webhook", "url": "https://hooks.slack.com/services/..." },
     "discord":{ "type": "webhook", "url": "https://discord.com/api/webhooks/...", "body": "{{\"content\": \"{title}: {message}\"}}" },
     "say":    { "type": "command", "notify": ["say", "{title}. {message}"] }
@@ -158,6 +160,8 @@ a test ping. macOS may ask once to allow your terminal app to post notifications
 | `system`  | yes | yes | native desktop; the default |
 | `banner`  | yes | no | macOS logo banners via `setup-logo` (terminal-notifier) |
 | `ntfy`    | yes | yes (round-trip) | phone push; you reply from the [ntfy](https://ntfy.sh) app and the agent reads it back |
+| `imessage`| yes | yes (round-trip) | macOS; texts your own number/Apple ID via Messages, reads your reply back from the Messages database. No API key, no fee |
+| `sms`     | yes | no | outbound SMS via [Twilio](https://www.twilio.com) (external provider); reaches non-Apple phones and works from a non-Mac host |
 | `webhook` | yes | no | one-way POST; default body `{"text": ...}` suits Slack. Discord needs a `content` body template (see [`config.example.json`](./config.example.json)) |
 | `command` | yes | yes | run any program; placeholders `{message} {title} {default} {options}` |
 
@@ -170,6 +174,53 @@ The **`command`** channel is the escape hatch for anything else: a Telegram CLI,
 text-to-speech, a webhook with a custom shape. For `ask`/`choose`
 the agent reads your program's **stdout**; for `confirm`, **exit 0 = approve**,
 nonzero = deny.
+
+### Text me: iMessage and SMS
+
+Two ways to land the ping as a normal text message on a phone.
+
+**`imessage`** (macOS, free, your own number). Sends through the Messages app
+under your own account to any phone number or Apple ID, and it is **two-way**:
+the agent texts you the question and reads your reply back from the local
+Messages database, so you can answer from your phone like ntfy.
+
+```json
+"iphone": { "type": "imessage", "to": "+15551234567" }
+```
+
+```bash
+agent-notify confirm "Deploy v2 to prod?" --channel iphone   # reply yes/no from your phone
+```
+
+One-time macOS setup (it fails loud and tells you which of these is missing):
+
+- Sign in to **Messages** with your Apple ID, and text the recipient once by hand.
+- Allow your terminal/agent to **control Messages** (System Settings -> Privacy &
+  Security -> Automation) so it can *send*.
+- Grant your terminal/agent **Full Disk Access** so it can *read your replies*
+  (for the blocking verbs) and *confirm delivery* (it reports a Messages "Not
+  Delivered" as an error instead of a false success). Without it, `notify` can
+  only confirm the message was handed to Messages, not that Apple delivered it.
+
+Set `"service": "SMS"` to relay green-bubble texts through a connected iPhone
+(Text Message Forwarding). SSH sessions can't send.
+
+**`sms`** (Twilio, any OS, reaches non-Apple phones). Outbound only -- a real SMS
+through [Twilio](https://www.twilio.com)'s API, useful from a Linux/Windows or
+headless host, or to text someone not on iMessage. Keep the token in the
+environment, not the file:
+
+```json
+"sms": { "type": "sms", "from": "+15550000000", "to": "+15551234567" }
+```
+
+```bash
+export TWILIO_ACCOUNT_SID=ACxxx TWILIO_AUTH_TOKEN=xxxx
+agent-notify notify "Nightly backup finished" --channel sms
+```
+
+For a reply over SMS use `imessage` (macOS) or `ntfy` (any OS) instead; two-way
+SMS would need a public inbound webhook, which this tool deliberately does not run.
 
 > **No silent fallback.** If a channel can't do the verb you asked for (say, the
 > `system` channel on a machine with no desktop), it fails loudly with a typed
@@ -196,6 +247,8 @@ agent --> shell --> agent-notify <verb> <message> [flags]
                        v
              system : osascript / notify-send / zenity / PowerShell  (this machine)
              ntfy   : POST to a topic, then poll it for your reply    (your phone)
+             imessage: Messages send, then poll chat.db for reply     (your phone, macOS)
+             sms    : POST to Twilio                                   (any phone)
              webhook: POST once                                       (Slack/Discord)
              command: run your program                                (anything)
                        |
@@ -212,6 +265,11 @@ agent --> shell --> agent-notify <verb> <message> [flags]
   not run through a shell.
 - ntfy topics are effectively passwords. Use a long, random topic name (or a
   self-hosted server with auth) so others can't read your prompts or inject replies.
+- The `sms` (Twilio) channel needs an auth token. Prefer `$TWILIO_ACCOUNT_SID` /
+  `$TWILIO_AUTH_TOKEN` in your environment over writing them into `config.json`.
+- The `imessage` channel reads `~/Library/Messages/chat.db` to collect your reply,
+  which is why the blocking verbs need Full Disk Access. It only ever reads, and
+  only matches replies from the configured `to` handle.
 
 ## Limitations
 
