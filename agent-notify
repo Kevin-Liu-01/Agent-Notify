@@ -649,7 +649,10 @@ def cmd_doctor(conf: dict) -> int:
     print("backends: " + ", ".join(
         f"{tool}={'yes' if shutil.which(tool) else 'no'}"
         for tool in ("osascript", "notify-send", "zenity", "kdialog", "powershell")))
-    print(f"default:  {conf['default_channel']}")
+    dc = conf["default_channel"]
+    if isinstance(dc, dict):
+        dc = ", ".join(f"{k}={v}" for k, v in dc.items())
+    print(f"default:  {dc}")
     print("channels:")
     for name, spec in conf["channels"].items():
         caps = ", ".join(capabilities(spec)) or "(none)"
@@ -727,7 +730,12 @@ def main(argv=None) -> int:
               timeout=getattr(args, "timeout", 0.0), default=getattr(args, "default", ""),
               options=getattr(args, "options", []),
               yes=getattr(args, "yes", "Approve"), no=getattr(args, "no", "Deny"))
-    channel_name = args.channel or conf["default_channel"]
+    # default_channel may be a single name, or a per-verb map like
+    # {"notify": "banner", "default": "system"} to route verbs differently.
+    default = conf["default_channel"]
+    if isinstance(default, dict):
+        default = default.get(args.verb) or default.get("default") or "system"
+    channel_name = args.channel or default
     try:
         res = make_channel(channel_name, conf).handle(req)
     except Unsupported as exc:

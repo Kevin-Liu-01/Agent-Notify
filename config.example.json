@@ -35,7 +35,11 @@
 
     "terminal-notifier": {
       "type": "command",
-      "notify": ["terminal-notifier", "-title", "{title}", "-message", "{message}"]
+      "_comment": "macOS only (brew install terminal-notifier). The -contentImage flag puts the logo in the banner. To show the logo on every plain notify while keeping dialogs on the system channel, set default_channel to {\"notify\": \"terminal-notifier\", \"default\": \"system\"}.",
+      "notify": [
+        "terminal-notifier", "-title", "{title}", "-message", "{message}",
+        "-contentImage", "/absolute/path/to/Agent-Notify/assets/logo.png"
+      ]
     }
   }
 }

@@ -138,6 +138,13 @@ To add more destinations, create `~/.config/agent-notify/config.json`
 Then target one explicitly: `agent-notify ask "..." --channel phone`, or set it as
 `default_channel` (handy on a headless box where the desktop channel can't run).
 
+`default_channel` can also be a per-verb map, so one-way pings go one place while
+prompts stay on the desktop:
+
+```json
+"default_channel": { "notify": "banner", "default": "system" }
+```
+
 ### Channel types
 
 | type | notify | ask / confirm / choose | notes |
